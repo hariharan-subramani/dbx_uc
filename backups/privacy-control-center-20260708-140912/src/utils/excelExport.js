@@ -24,39 +24,6 @@ const normalizePrivileges = (privileges) => {
   return privileges || '';
 };
 
-const accessRows = (items = []) => items.map((item) => ({
-  Type: item.object_type || '',
-  Object: item.object_name || '',
-  Principal: item.principal || '',
-  'Permission Source': item.permission_source || '',
-  Privileges: normalizePrivileges(item.privileges),
-}));
-
-const comparisonRows = (comparison = {}) => {
-  const rows = [];
-  const user1 = comparison.user1?.user?.email || comparison.user1?.user?.name || 'User A';
-  const user2 = comparison.user2?.user?.email || comparison.user2?.user?.name || 'User B';
-  const addRows = (label, values1 = [], values2 = []) => {
-    const allValues = Array.from(new Set([...values1, ...values2])).sort();
-    allValues.forEach((value) => {
-      rows.push({
-        Category: label,
-        Value: value,
-        [user1]: values1.includes(value) ? 'YES' : 'NO',
-        [user2]: values2.includes(value) ? 'YES' : 'NO',
-        Difference: values1.includes(value) === values2.includes(value) ? '' : 'Missing access',
-      });
-    });
-  };
-
-  addRows('Groups', comparison.user1?.groups || [], comparison.user2?.groups || []);
-  addRows('Catalogs', (comparison.user1?.access?.catalogs || []).map((item) => item.object_name), (comparison.user2?.access?.catalogs || []).map((item) => item.object_name));
-  addRows('Schemas', (comparison.user1?.access?.schemas || []).map((item) => item.object_name), (comparison.user2?.access?.schemas || []).map((item) => item.object_name));
-  addRows('Tables', (comparison.user1?.access?.tables || []).map((item) => item.object_name), (comparison.user2?.access?.tables || []).map((item) => item.object_name));
-  addRows('Privileges', comparison.user1?.effective_permissions || [], comparison.user2?.effective_permissions || []);
-  return rows;
-};
-
 const detailMapFrom = (details = []) => Object.fromEntries(
   details.map((item) => [item.label, item.value]),
 );
@@ -291,41 +258,146 @@ export const exportTable = ({
   downloadWorkbook(workbook, `Table_${safeFilePart(tableName)}.xlsx`);
 };
 
+const toAccessRows = (items = []) => items.map((item) => ({
+  Name: item.name || '',
+  Catalog: item.catalog || '',
+  Schema: item.schema || '',
+  Table: item.table || '',
+  Privileges: normalizePrivileges(item.privileges),
+  Source: item.source || '',
+  Principal: item.principal || '',
+}));
+
 export const exportUserAccess = ({ profile, exportedBy }) => {
   const workbook = createWorkbook();
   const user = profile?.user || {};
-  const access = profile?.access || {};
-  appendSheet(workbook, 'User', XLSX.utils.json_to_sheet([{
+  const groups = profile?.groups || [];
+  const details = [{
     Name: user.name || '',
-    Email: user.email || user.user_name || '',
+    Email: user.email || '',
     Status: user.status || '',
     'Principal Type': user.principal_type || 'User',
     'Export Date': exportTimestamp(),
     'Exported By': exportedBy || '',
-  }]));
-  appendSheet(workbook, 'Groups', sheetFromRows((profile?.groups || []).map((group) => ({ Group: group })), 'No groups available.'));
-  appendSheet(workbook, 'Catalog Access', sheetFromRows(accessRows(access.catalogs), 'No catalog access available.'));
-  appendSheet(workbook, 'Schema Access', sheetFromRows(accessRows(access.schemas), 'No schema access available.'));
-  appendSheet(workbook, 'Table Access', sheetFromRows(accessRows(access.tables), 'No table access available.'));
-  appendSheet(workbook, 'Privileges', sheetFromRows((profile?.effective_permissions || []).map((privilege) => ({ Privilege: privilege })), 'No privileges available.'));
+  }];
+
+  appendSheet(workbook, 'User Information', XLSX.utils.json_to_sheet(details));
+  appendSheet(
+    workbook,
+    'Groups',
+    sheetFromRows(groups.map((group) => ({ Group: group.name || '' })), 'No groups available.'),
+  );
+  appendSheet(
+    workbook,
+    'Catalog Access',
+    sheetFromRows(toAccessRows(profile?.catalogs), 'No catalog access available.'),
+  );
+  appendSheet(
+    workbook,
+    'Schema Access',
+    sheetFromRows(toAccessRows(profile?.schemas), 'No schema access available.'),
+  );
+  appendSheet(
+    workbook,
+    'Table Access',
+    sheetFromRows(toAccessRows(profile?.tables), 'No table access available.'),
+  );
+  appendSheet(
+    workbook,
+    'Privileges',
+    sheetFromRows((profile?.privileges || []).map((privilege) => ({ Privilege: privilege })), 'No privileges available.'),
+  );
+
   downloadWorkbook(workbook, `UserAccess_${safeFilePart(user.email || user.name)}.xlsx`);
 };
 
-export const exportUserComparison = ({ comparison, exportedBy }) => {
+const toComparisonRows = (section = {}) => {
+  const values = new Set([
+    ...(section.user_a || []),
+    ...(section.user_b || []),
+  ]);
+
+  return [...values].sort().map((value) => ({
+    Name: value,
+    'User A': section.user_a?.includes(value) ? 'YES' : 'NO',
+    'User B': section.user_b?.includes(value) ? 'YES' : 'NO',
+    Difference: section.missing_for_user_b?.includes(value)
+      ? 'Missing for User B'
+      : section.extra_for_user_b?.includes(value)
+        ? 'Extra for User B'
+        : 'Matched',
+  }));
+};
+
+export const exportUserComparison = ({ report, exportedBy }) => {
   const workbook = createWorkbook();
+  const comparison = report?.comparison || {};
+  const userA = report?.user_a?.user || {};
+  const userB = report?.user_b?.user || {};
+
   appendSheet(workbook, 'Summary', XLSX.utils.json_to_sheet([{
-    'User A': comparison?.user1?.user?.email || comparison?.user1?.user?.name || '',
-    'User B': comparison?.user2?.user?.email || comparison?.user2?.user?.name || '',
+    'User A': userA.email || userA.name || '',
+    'User B': userB.email || userB.name || '',
     'Export Date': exportTimestamp(),
     'Exported By': exportedBy || '',
   }]));
-  appendSheet(workbook, 'Comparison', sheetFromRows(comparisonRows(comparison), 'No comparison rows available.'));
-  appendSheet(workbook, 'Recommendations', sheetFromRows((comparison?.recommendations || []).map((item) => ({
-    Action: item.action || '',
-    Target: item.target || '',
-  })), 'No recommendations available.'));
-  downloadWorkbook(
+
+  appendSheet(workbook, 'Groups', sheetFromRows(toComparisonRows(comparison.groups), 'No group differences.'));
+  appendSheet(workbook, 'Catalogs', sheetFromRows(toComparisonRows(comparison.catalogs), 'No catalog differences.'));
+  appendSheet(workbook, 'Schemas', sheetFromRows(toComparisonRows(comparison.schemas), 'No schema differences.'));
+  appendSheet(workbook, 'Tables', sheetFromRows(toComparisonRows(comparison.tables), 'No table differences.'));
+  appendSheet(workbook, 'Privileges', sheetFromRows(toComparisonRows(comparison.privileges), 'No privilege differences.'));
+  appendSheet(
     workbook,
-    `UserComparison_${safeFilePart(comparison?.user1?.user?.email || 'UserA')}_${safeFilePart(comparison?.user2?.user?.email || 'UserB')}.xlsx`,
+    'Recommended Actions',
+    sheetFromRows((report?.recommended_actions || []).map((action) => ({ Action: action })), 'No recommended actions.'),
   );
+
+  downloadWorkbook(workbook, `UserComparison_${safeFilePart(userA.email || userA.name)}_${safeFilePart(userB.email || userB.name)}.xlsx`);
+};
+
+export const exportUserGroups = ({
+  user,
+  groups,
+  workspace,
+  generatedBy,
+}) => {
+  const workbook = createWorkbook();
+  const rows = (groups || []).map((group) => ({
+    User: user || '',
+    Group: group.name || group || '',
+    'Export Date': exportTimestamp(),
+    Workspace: workspace || '',
+    'Generated By': generatedBy || '',
+  }));
+
+  appendSheet(
+    workbook,
+    'User Groups',
+    sheetFromRows(rows, 'No groups available.'),
+  );
+  downloadWorkbook(workbook, `UserGroups_${safeFilePart(user)}.xlsx`);
+};
+
+export const exportGroupMembers = ({
+  group,
+  members,
+  workspace,
+  generatedBy,
+}) => {
+  const workbook = createWorkbook();
+  const rows = (members || []).map((member) => ({
+    Group: group || '',
+    User: member.email || member.name || member || '',
+    'Export Date': exportTimestamp(),
+    Workspace: workspace || '',
+    'Generated By': generatedBy || '',
+  }));
+
+  appendSheet(
+    workbook,
+    'Group Members',
+    sheetFromRows(rows, 'No members available.'),
+  );
+  downloadWorkbook(workbook, `GroupMembers_${safeFilePart(group)}.xlsx`);
 };

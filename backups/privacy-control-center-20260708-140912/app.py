@@ -15,8 +15,10 @@ from services.databricks_api import (
     get_schema_objects,
     get_table_statistics,
     list_users,
-    get_user_groups,
     get_user_access,
+    get_user_groups,
+    get_group_members,
+    list_groups,
     compare_users,
 )
 
@@ -74,25 +76,45 @@ def table_data(
 def get_user():
     return get_current_user()
 
-@app.get("/workspace")
-def workspace():
-    return get_workspace()
-
 @app.get("/users")
 def users(search: str = ""):
     return list_users(search)
+
+@app.get("/users/compare")
+def users_compare(user1: str, user2: str, scan: bool = Query(default=False)):
+    return compare_users(user1, user2, scan_permissions=scan)
+
+@app.get("/users/{user}/access")
+def user_access(user: str, scan: bool = Query(default=False)):
+    return get_user_access(user, scan_permissions=scan)
 
 @app.get("/users/{user}/groups")
 def user_groups(user: str):
     return get_user_groups(user)
 
-@app.get("/users/{user}/access")
-def user_access(user: str, deep: bool = False):
-    return get_user_access(user, deep=deep)
+@app.get("/groups")
+def groups(search: str = ""):
+    data = list_groups(search)
+    if not data.get("success"):
+        return data
+    return {
+        "success": True,
+        "groups": [
+            {
+                "id": group.get("id"),
+                "name": group.get("displayName") or group.get("name"),
+            }
+            for group in data.get("groups", [])
+        ],
+    }
 
-@app.get("/users/compare")
-def users_compare(user1: str, user2: str, deep: bool = False):
-    return compare_users(user1, user2, deep=deep)
+@app.get("/groups/{group_name}/members")
+def group_members(group_name: str):
+    return get_group_members(group_name)
+
+@app.get("/workspace")
+def workspace():
+    return get_workspace()
 
 @app.get("/catalogs/{catalog_name}/metadata")
 def catalog_metadata(catalog_name: str):

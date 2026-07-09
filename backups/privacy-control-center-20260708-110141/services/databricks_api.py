@@ -16,11 +16,6 @@ logger = logging.getLogger(__name__)
 DATABRICKS_HOST = os.getenv("DATABRICKS_HOST", "").rstrip("/")
 DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN", "")
 
-try:
-    ACCESS_SCAN_LIMIT = int(os.getenv("DATABRICKS_ACCESS_SCAN_LIMIT", "20"))
-except ValueError:
-    ACCESS_SCAN_LIMIT = 20
-
 # Simple in-memory cache for API responses
 _cache = {}
 CACHE_DURATION = timedelta(minutes=5)
@@ -169,367 +164,6 @@ def get_current_user() -> Dict[str, Any]:
     }
 
 
-def _normalize_list(value: Any) -> List[Any]:
-    if isinstance(value, list):
-        return value
-    return []
-
-
-def _principal_matches(candidate: str, target: str) -> bool:
-    candidate_norm = (candidate or "").strip().lower()
-    target_norm = (target or "").strip().lower()
-    if not candidate_norm or not target_norm:
-        return False
-    return candidate_norm == target_norm
-
-
-def _flatten_privileges(permission: Dict[str, Any]) -> List[str]:
-    raw_privileges = permission.get("privileges") or permission.get("all_permissions") or []
-    privileges = []
-    for privilege in _normalize_list(raw_privileges):
-        if isinstance(privilege, dict):
-            value = (
-                privilege.get("privilege")
-                or privilege.get("name")
-                or privilege.get("permission")
-            )
-            if value:
-                privileges.append(str(value))
-        elif privilege:
-            privileges.append(str(privilege))
-    return sorted(set(privileges))
-
-
-def _extract_principal_name(permission: Dict[str, Any]) -> str:
-    principal = permission.get("principal")
-    if isinstance(principal, dict):
-        return (
-            principal.get("display_name")
-            or principal.get("user_name")
-            or principal.get("userName")
-            or principal.get("group_name")
-            or principal.get("groupName")
-            or principal.get("name")
-            or ""
-        )
-    return principal or ""
-
-
-def _scim_resource_to_user(resource: Dict[str, Any]) -> Dict[str, Any]:
-    emails = resource.get("emails") or []
-    primary_email = next(
-        (email.get("value") for email in emails if isinstance(email, dict) and email.get("primary")),
-        None,
-    )
-    email = primary_email or resource.get("userName") or ""
-    return {
-        "id": resource.get("id"),
-        "name": resource.get("displayName") or resource.get("userName") or email,
-        "email": email,
-        "status": "Active" if resource.get("active", True) else "Inactive",
-        "principal_type": "User",
-        "user_name": resource.get("userName") or email,
-    }
-
-
-def _scim_group_name(resource: Dict[str, Any]) -> str:
-    return resource.get("displayName") or resource.get("groupName") or resource.get("name") or ""
-
-
-def list_users(search: str = "") -> Dict[str, Any]:
-    """
-    List workspace users from SCIM. Search is case-insensitive and supports partial matches.
-    """
-    result = make_request(
-        "GET",
-        "/api/2.0/preview/scim/v2/Users",
-        params={"count": 1000},
-    )
-
-    if not result["success"]:
-        return {
-            "success": False,
-            "users": [],
-            "message": "User listing is not available for this Databricks workspace.",
-            "error": result.get("error"),
-            "status_code": result.get("status_code"),
-        }
-
-    users = [_scim_resource_to_user(resource) for resource in result["data"].get("Resources", [])]
-    query = (search or "").strip().lower()
-    if query:
-        users = [
-            user for user in users
-            if query in (user.get("name") or "").lower()
-            or query in (user.get("email") or "").lower()
-            or query in (user.get("user_name") or "").lower()
-        ]
-
-    return {"success": True, "users": users}
-
-
-def get_user_groups(user: str) -> Dict[str, Any]:
-    """
-    Return groups where the SCIM member list contains the requested user.
-    """
-    users_result = list_users(search=user)
-    matched_user = None
-    for candidate in users_result.get("users", []):
-        if _principal_matches(candidate.get("email"), user) or _principal_matches(candidate.get("user_name"), user):
-            matched_user = candidate
-            break
-    if not matched_user and users_result.get("users"):
-        matched_user = users_result["users"][0]
-
-    groups_result = make_request(
-        "GET",
-        "/api/2.0/preview/scim/v2/Groups",
-        params={"count": 1000},
-    )
-    if not groups_result["success"]:
-        return {
-            "success": False,
-            "user": matched_user or {"email": user, "name": user, "principal_type": "User", "status": "Unknown"},
-            "groups": [],
-            "message": "Group membership is not available for this Databricks workspace.",
-            "error": groups_result.get("error"),
-            "status_code": groups_result.get("status_code"),
-        }
-
-    groups = []
-    user_id = (matched_user or {}).get("id")
-    user_email = (matched_user or {}).get("email") or user
-    user_name = (matched_user or {}).get("user_name") or user
-
-    for group in groups_result["data"].get("Resources", []):
-        for member in _normalize_list(group.get("members")):
-            member_value = member.get("value") or member.get("$ref") or ""
-            member_display = member.get("display") or ""
-            if (
-                _principal_matches(member_value, user_id)
-                or _principal_matches(member_display, user_email)
-                or _principal_matches(member_display, user_name)
-            ):
-                groups.append(_scim_group_name(group))
-                break
-
-    return {
-        "success": True,
-        "user": matched_user or {"email": user, "name": user, "principal_type": "User", "status": "Unknown"},
-        "groups": sorted(set(filter(None, groups))),
-    }
-
-
-def _append_access_matches(
-    access: Dict[str, List[Dict[str, Any]]],
-    object_type: str,
-    object_name: str,
-    permissions_result: Dict[str, Any],
-    user: str,
-    groups: List[str],
-) -> None:
-    if not permissions_result.get("success"):
-        return
-
-    for permission in permissions_result.get("permissions", []):
-        principal_name = _extract_principal_name(permission)
-        source = None
-        if _principal_matches(principal_name, user):
-            source = "Direct"
-        elif any(_principal_matches(principal_name, group) for group in groups):
-            source = f"Inherited from group: {principal_name}"
-
-        if source:
-            entry = {
-                "object_type": object_type,
-                "object_name": object_name,
-                "principal": principal_name,
-                "permission_source": source,
-                "privileges": _flatten_privileges(permission),
-            }
-            access[object_type].append(entry)
-
-
-def _permission_api_unavailable(result: Dict[str, Any]) -> bool:
-    error = str((result or {}).get("error", "")).lower()
-    return (result or {}).get("status_code") in {404, 501} or any(
-        marker in error
-        for marker in (
-            "no api found",
-            "not found",
-            "not supported",
-            "feature disabled",
-            "not available",
-        )
-    )
-
-
-def get_user_access(user: str, deep: bool = False) -> Dict[str, Any]:
-    """
-    Build an effective access profile by combining SCIM group membership with
-    Unity Catalog permissions visible to the configured token.
-    """
-    groups_data = get_user_groups(user)
-    user_info = groups_data.get("user") or {
-        "email": user,
-        "name": user,
-        "status": "Unknown",
-        "principal_type": "User",
-    }
-    groups = groups_data.get("groups", [])
-    access = {"workspace": [], "catalogs": [], "schemas": [], "tables": []}
-    messages = []
-
-    if not groups_data.get("success"):
-        messages.append(groups_data.get("message", "Group membership is unavailable."))
-
-    workspace = get_workspace()
-    for workspace_item in workspace.get("workspaces", []):
-        access["workspace"].append({
-            "object_type": "workspace",
-            "object_name": workspace_item.get("display_name") or workspace_item.get("name"),
-            "principal": user,
-            "permission_source": "Workspace identity",
-            "privileges": ["CAN_ACCESS"],
-        })
-
-    if not deep:
-        messages.append("Object-level permission scanning is available with deep=true, but is skipped by default for interactive performance.")
-        return {
-            "success": True,
-            "user": user_info,
-            "groups": groups,
-            "access": access,
-            "effective_permissions": ["CAN_ACCESS"],
-            "messages": messages,
-        }
-
-    catalogs_result = list_catalogs()
-    if not catalogs_result.get("success"):
-        return {
-            "success": False,
-            "user": user_info,
-            "groups": groups,
-            "access": access,
-            "effective_permissions": [],
-            "message": "Catalog permissions could not be analyzed for this workspace.",
-            "details": catalogs_result.get("error"),
-        }
-
-    scan_count = 0
-    for catalog in catalogs_result.get("catalogs", []):
-        if scan_count >= ACCESS_SCAN_LIMIT:
-            messages.append(f"Access analysis stopped after {ACCESS_SCAN_LIMIT} permission checks. Increase DATABRICKS_ACCESS_SCAN_LIMIT for a deeper scan.")
-            break
-        scan_count += 1
-        catalog_permissions = get_permissions("catalog", catalog)
-        if not catalog_permissions.get("success") and _permission_api_unavailable(catalog_permissions):
-            messages.append("Unity Catalog permission analysis is not available for this Databricks workspace.")
-            return {
-                "success": True,
-                "user": user_info,
-                "groups": groups,
-                "access": access,
-                "effective_permissions": [],
-                "messages": messages,
-            }
-        _append_access_matches(access, "catalogs", catalog, catalog_permissions, user, groups)
-
-        schemas_result = list_schemas(catalog)
-        if not schemas_result.get("success"):
-            continue
-
-        for schema in schemas_result.get("schemas", []):
-            if scan_count >= ACCESS_SCAN_LIMIT:
-                messages.append(f"Access analysis stopped after {ACCESS_SCAN_LIMIT} permission checks. Increase DATABRICKS_ACCESS_SCAN_LIMIT for a deeper scan.")
-                break
-            scan_count += 1
-            schema_name = schema.get("name")
-            full_schema = f"{catalog}.{schema_name}"
-            schema_permissions = get_permissions("schema", full_schema)
-            _append_access_matches(access, "schemas", full_schema, schema_permissions, user, groups)
-
-            tables_result = list_tables(catalog, schema_name)
-            if not tables_result.get("success"):
-                continue
-
-            for table in tables_result.get("tables", []):
-                if scan_count >= ACCESS_SCAN_LIMIT:
-                    messages.append(f"Access analysis stopped after {ACCESS_SCAN_LIMIT} permission checks. Increase DATABRICKS_ACCESS_SCAN_LIMIT for a deeper scan.")
-                    break
-                scan_count += 1
-                table_name = table.get("name")
-                full_table = f"{catalog}.{schema_name}.{table_name}"
-                table_permissions = get_permissions("table", full_table)
-                _append_access_matches(access, "tables", full_table, table_permissions, user, groups)
-
-    effective_permissions = sorted({
-        privilege
-        for entries in access.values()
-        for entry in entries
-        for privilege in entry.get("privileges", [])
-    })
-
-    return {
-        "success": True,
-        "user": user_info,
-        "groups": groups,
-        "access": access,
-        "effective_permissions": effective_permissions,
-        "messages": messages,
-    }
-
-
-def _names_from_access(access_profile: Dict[str, Any], section: str) -> set:
-    return {
-        item.get("object_name")
-        for item in access_profile.get("access", {}).get(section, [])
-        if item.get("object_name")
-    }
-
-
-def compare_users(user1: str, user2: str, deep: bool = False) -> Dict[str, Any]:
-    first = get_user_access(user1, deep=deep)
-    second = get_user_access(user2, deep=deep)
-
-    first_groups = set(first.get("groups", []))
-    second_groups = set(second.get("groups", []))
-    first_privileges = set(first.get("effective_permissions", []))
-    second_privileges = set(second.get("effective_permissions", []))
-
-    sections = ["catalogs", "schemas", "tables"]
-    differences = {
-        "groups_missing_from_user2": sorted(first_groups - second_groups),
-        "groups_missing_from_user1": sorted(second_groups - first_groups),
-        "privileges_missing_from_user2": sorted(first_privileges - second_privileges),
-        "privileges_missing_from_user1": sorted(second_privileges - first_privileges),
-    }
-
-    for section in sections:
-        first_names = _names_from_access(first, section)
-        second_names = _names_from_access(second, section)
-        differences[f"{section}_missing_from_user2"] = sorted(first_names - second_names)
-        differences[f"{section}_missing_from_user1"] = sorted(second_names - first_names)
-
-    recommendations = [
-        {"action": "Add user to group", "target": group}
-        for group in differences["groups_missing_from_user2"]
-    ]
-    recommendations.extend(
-        {"action": "Grant privilege", "target": privilege}
-        for privilege in differences["privileges_missing_from_user2"]
-    )
-
-    return {
-        "success": first.get("success", False) and second.get("success", False),
-        "user1": first,
-        "user2": second,
-        "differences": differences,
-        "recommendations": recommendations,
-        "message": "Some access details are unavailable." if not (first.get("success") and second.get("success")) else "",
-    }
-
-
 def get_workspace() -> Dict[str, Any]:
     """
     Return the configured Databricks workspace identity for the frontend selector.
@@ -547,6 +181,365 @@ def get_workspace() -> Dict[str, Any]:
                 "workspace_id": os.getenv("DATABRICKS_WORKSPACE_ID", workspace_host or ""),
             }
         ],
+    }
+
+
+def _identity_from_scim_user(user_data: Dict[str, Any]) -> Dict[str, Any]:
+    emails = user_data.get("emails") or []
+    email = ""
+    if emails and isinstance(emails[0], dict):
+        email = emails[0].get("value") or ""
+
+    return {
+        "id": user_data.get("id"),
+        "name": user_data.get("displayName") or user_data.get("userName") or email,
+        "email": user_data.get("userName") or email,
+        "status": "Active" if user_data.get("active", True) else "Inactive",
+        "principal_type": "User",
+    }
+
+
+def list_users(search: str = "") -> Dict[str, Any]:
+    """
+    Search workspace users through Databricks SCIM.
+    """
+    cache_key = "scim_users"
+    if cache_key in _cache and datetime.now() - _cache[cache_key][1] < CACHE_DURATION:
+        users = _cache[cache_key][0]
+    else:
+        params = {"count": 100}
+        result = make_request("GET", "/api/2.0/preview/scim/v2/Users", params=params)
+
+        if not result["success"]:
+            return {
+                "success": False,
+                "users": [],
+                "message": "User search is not available for this Databricks workspace.",
+                "error": result.get("error"),
+                "status_code": result.get("status_code"),
+            }
+
+        resources = result["data"].get("Resources", [])
+        users = [_identity_from_scim_user(user) for user in resources]
+        _cache[cache_key] = (users, datetime.now())
+
+    if users is not None:
+        if search:
+            normalized = search.lower()
+            users = [
+                user for user in users
+                if normalized in str(user.get("name") or "").lower()
+                or normalized in str(user.get("email") or "").lower()
+            ]
+        return {
+            "success": True,
+            "users": users,
+        }
+
+    return {"success": True, "users": []}
+
+
+def list_groups() -> Dict[str, Any]:
+    """
+    Return SCIM groups with short caching to keep user comparison responsive.
+    """
+    cache_key = "scim_groups"
+    if cache_key in _cache and datetime.now() - _cache[cache_key][1] < CACHE_DURATION:
+        return {
+            "success": True,
+            "groups": _cache[cache_key][0],
+        }
+
+    result = make_request("GET", "/api/2.0/preview/scim/v2/Groups", params={"count": 100})
+    if not result["success"]:
+        return {
+            "success": False,
+            "groups": [],
+            "message": "Group membership is not available for this Databricks workspace.",
+            "error": result.get("error"),
+        }
+
+    groups = result["data"].get("Resources", [])
+    _cache[cache_key] = (groups, datetime.now())
+    return {
+        "success": True,
+        "groups": groups,
+    }
+
+
+def _find_user(user: str) -> Dict[str, Any]:
+    users_result = list_users(user)
+    if not users_result.get("success"):
+        return users_result
+
+    normalized = user.lower()
+    users = users_result.get("users", [])
+    exact = next(
+        (
+            item for item in users
+            if item.get("email", "").lower() == normalized
+            or item.get("name", "").lower() == normalized
+        ),
+        None,
+    )
+
+    return {
+        "success": True,
+        "user": exact or (users[0] if users else None),
+    }
+
+
+def get_user_groups(user: str) -> Dict[str, Any]:
+    """
+    Return groups containing the requested user using Databricks SCIM.
+    """
+    user_result = _find_user(user)
+    if not user_result.get("success"):
+        return {
+            "success": False,
+            "groups": [],
+            "message": user_result.get("message", "Unable to search users."),
+        }
+
+    user_info = user_result.get("user")
+    if not user_info:
+        return {
+            "success": False,
+            "groups": [],
+            "message": "User was not found in this Databricks workspace.",
+        }
+
+    groups_result = list_groups()
+    if not groups_result["success"]:
+        return {
+            "success": False,
+            "groups": [],
+            "message": groups_result.get("message", "Group membership is not available for this Databricks workspace."),
+            "error": groups_result.get("error"),
+            "user": user_info,
+        }
+
+    target_values = {
+        str(user_info.get("id") or "").lower(),
+        str(user_info.get("email") or "").lower(),
+        str(user_info.get("name") or "").lower(),
+    }
+    groups = []
+    for group in groups_result.get("groups", []):
+        members = group.get("members") or []
+        if any(
+            str(member.get("value") or member.get("display") or "").lower() in target_values
+            for member in members
+            if isinstance(member, dict)
+        ):
+            groups.append({
+                "id": group.get("id"),
+                "name": group.get("displayName") or group.get("name"),
+            })
+
+    return {
+        "success": True,
+        "user": user_info,
+        "groups": groups,
+    }
+
+
+def _principal_matches(permission: Dict[str, Any], user_info: Dict[str, Any], groups: List[Dict[str, Any]]) -> bool:
+    principal = str(permission.get("principal") or "").lower()
+    principal_type = str(permission.get("principal_type") or "").lower()
+    user_names = {
+        str(user_info.get("email") or "").lower(),
+        str(user_info.get("name") or "").lower(),
+    }
+    group_names = {str(group.get("name") or "").lower() for group in groups}
+
+    return (
+        (principal_type == "user" and principal in user_names)
+        or (principal_type == "group" and principal in group_names)
+    )
+
+
+def _permission_source(permission: Dict[str, Any]) -> str:
+    return "Inherited from Group" if str(permission.get("principal_type", "")).lower() == "group" else "Direct"
+
+
+def _append_access(access: Dict[str, List[Dict[str, Any]]], category: str, item: Dict[str, Any]) -> None:
+    access[category].append(item)
+    for privilege in item.get("privileges", []):
+        if privilege and privilege not in access["privileges"]:
+            access["privileges"].append(privilege)
+
+
+def get_user_access(user: str, scan_permissions: bool = True) -> Dict[str, Any]:
+    """
+    Build an access profile by matching direct and group permissions across Unity Catalog objects.
+    """
+    groups_result = get_user_groups(user)
+    if not groups_result.get("success"):
+        return {
+            "success": False,
+            "message": groups_result.get("message", "Unable to load user access."),
+            "user": groups_result.get("user"),
+            "groups": groups_result.get("groups", []),
+            "catalogs": [],
+            "schemas": [],
+            "tables": [],
+            "workspaces": [],
+            "privileges": [],
+        }
+
+    user_info = groups_result.get("user")
+    groups = groups_result.get("groups", [])
+    access = {
+        "catalogs": [],
+        "schemas": [],
+        "tables": [],
+        "workspaces": get_workspace().get("workspaces", []),
+        "privileges": [],
+    }
+
+    if not scan_permissions:
+        return {
+            "success": True,
+            "scan_complete": False,
+            "message": "User profile loaded. Detailed access scan is still pending.",
+            "user": user_info,
+            "groups": groups,
+            **access,
+        }
+
+    catalogs_result = list_catalogs()
+    if not catalogs_result.get("success"):
+        return {
+            "success": False,
+            "message": "Catalog access could not be scanned for this workspace.",
+            "user": user_info,
+            "groups": groups,
+            **access,
+        }
+
+    for catalog_name in catalogs_result.get("catalogs", []):
+        catalog_permissions = get_permissions("catalog", catalog_name)
+        for permission in catalog_permissions.get("permissions", []):
+            if _principal_matches(permission, user_info, groups):
+                _append_access(access, "catalogs", {
+                    "name": catalog_name,
+                    "privileges": permission.get("privileges", []),
+                    "source": _permission_source(permission),
+                    "principal": permission.get("principal"),
+                })
+
+        schemas_result = list_schemas(catalog_name)
+        for schema in schemas_result.get("schemas", []):
+            schema_name = schema.get("name")
+            if not schema_name:
+                continue
+            full_schema = f"{catalog_name}.{schema_name}"
+            schema_permissions = get_permissions("schema", full_schema)
+            for permission in schema_permissions.get("permissions", []):
+                if _principal_matches(permission, user_info, groups):
+                    _append_access(access, "schemas", {
+                        "name": full_schema,
+                        "catalog": catalog_name,
+                        "schema": schema_name,
+                        "privileges": permission.get("privileges", []),
+                        "source": _permission_source(permission),
+                        "principal": permission.get("principal"),
+                    })
+
+            tables_result = list_tables(catalog_name, schema_name)
+            for table in tables_result.get("tables", []):
+                table_name = table.get("name")
+                if not table_name:
+                    continue
+                full_table = f"{catalog_name}.{schema_name}.{table_name}"
+                table_permissions = get_permissions("table", full_table)
+                for permission in table_permissions.get("permissions", []):
+                    if _principal_matches(permission, user_info, groups):
+                        _append_access(access, "tables", {
+                            "name": full_table,
+                            "catalog": catalog_name,
+                            "schema": schema_name,
+                            "table": table_name,
+                            "privileges": permission.get("privileges", []),
+                            "source": _permission_source(permission),
+                            "principal": permission.get("principal"),
+                        })
+
+    access["privileges"] = sorted(access["privileges"])
+    return {
+        "success": True,
+        "scan_complete": True,
+        "user": user_info,
+        "groups": groups,
+        **access,
+    }
+
+
+def _names(values: List[Dict[str, Any]]) -> List[str]:
+    return sorted({item.get("name") for item in values if item.get("name")})
+
+
+def _missing(source: List[str], target: List[str]) -> List[str]:
+    return [item for item in source if item not in set(target)]
+
+
+def compare_users(user1: str, user2: str, scan_permissions: bool = False) -> Dict[str, Any]:
+    """
+    Compare two users' access profiles and recommend actions to align User B to User A.
+    """
+    first = get_user_access(user1, scan_permissions=scan_permissions)
+    second = get_user_access(user2, scan_permissions=scan_permissions)
+
+    if not first.get("success") or not second.get("success"):
+        return {
+            "success": False,
+            "message": "Unable to compare users because one or both access profiles could not be loaded.",
+            "user_a": first,
+            "user_b": second,
+        }
+
+    comparison = {}
+    for category in ("groups", "catalogs", "schemas", "tables"):
+        a_values = _names(first.get(category, []))
+        b_values = _names(second.get(category, []))
+        comparison[category] = {
+            "user_a": a_values,
+            "user_b": b_values,
+            "missing_for_user_b": _missing(a_values, b_values),
+            "extra_for_user_b": _missing(b_values, a_values),
+        }
+
+    a_privileges = sorted(set(first.get("privileges", [])))
+    b_privileges = sorted(set(second.get("privileges", [])))
+    comparison["privileges"] = {
+        "user_a": a_privileges,
+        "user_b": b_privileges,
+        "missing_for_user_b": _missing(a_privileges, b_privileges),
+        "extra_for_user_b": _missing(b_privileges, a_privileges),
+    }
+
+    summary = []
+    recommendations = []
+    for group in comparison["groups"]["missing_for_user_b"]:
+        summary.append(f"{group} group")
+        recommendations.append(f"Add User B to {group}")
+    for category in ("catalogs", "schemas", "tables"):
+        label = category[:-1]
+        for item in comparison[category]["missing_for_user_b"]:
+            summary.append(f"{item} {label}")
+    for privilege in comparison["privileges"]["missing_for_user_b"]:
+        summary.append(f"{privilege} privilege")
+        recommendations.append(f"Grant {privilege}")
+
+    return {
+        "success": True,
+        "scan_complete": scan_permissions,
+        "user_a": first,
+        "user_b": second,
+        "comparison": comparison,
+        "difference_summary": summary,
+        "recommended_actions": recommendations,
     }
 
 
@@ -862,11 +855,7 @@ def get_permissions(object_type: str, object_name: str) -> Dict[str, Any]:
     Returns:
         Dict with permissions list
     """
-    result = make_request(
-        "GET",
-        f"/api/2.1/unity-catalog/permissions/{object_type}/{quote(object_name)}",
-        timeout=8,
-    )
+    result = make_request("GET", f"/api/2.1/unity-catalog/permissions/{object_type}/{quote(object_name)}")
     
     if result["success"]:
         permissions_data = result["data"]

@@ -13,9 +13,6 @@ const Icon = ({ name, size = 18 }) => {
     close: <><path d="m6 6 12 12M18 6 6 18"/></>,
     table: <><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 9h18M9 9v11M15 9v11"/></>,
     database: <><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></>,
-    user: <><circle cx="12" cy="8" r="4"/><path d="M4 21c1.7-4 4.4-6 8-6s6.3 2 8 6"/></>,
-    users: <><circle cx="9" cy="8" r="3.2"/><path d="M3 20c1.3-3.4 3.3-5 6-5"/><circle cx="16" cy="9" r="3"/><path d="M12 20c1.2-3.2 3.1-4.8 6-4.8 1.2 0 2.2.3 3 .8"/></>,
-    download: <><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 };
