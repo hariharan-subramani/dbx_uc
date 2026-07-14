@@ -8,6 +8,7 @@ const sections = [
   ['catalogs', 'Catalog Access'],
   ['schemas', 'Schema Access'],
   ['tables', 'Table Access'],
+  ['volumes', 'Volume Access'],
   ['privileges', 'Privileges'],
 ];
 
@@ -98,10 +99,39 @@ function UserPicker({ id, label, value, onChange, onSubmit }) {
 }
 
 function ComparisonTable({ title, section }) {
+  const objectRows = section?.objects;
   const names = [...new Set([
     ...(section?.user_a || []),
     ...(section?.user_b || []),
   ])].sort();
+
+  if (objectRows) {
+    return (
+      <section className="identity-section">
+        <div className="identity-section-header">
+          <h3>{title}</h3>
+          <span>{objectRows.reduce((count, item) => count + item.missing_for_user_b.length, 0)} missing</span>
+        </div>
+        {objectRows.length === 0 ? <div className="empty-state">No access found for this section.</div> : (
+          <div className="permission-table-wrapper"><table className="permission-table comparison-table">
+            <thead><tr><th>Name</th><th>User A</th><th>User B</th><th>Difference</th></tr></thead>
+            <tbody>{objectRows.map((item) => (
+              <tr key={item.name} className={item.missing_for_user_b.length ? 'difference-row' : ''}>
+                <td className="principal-cell"><span className="principal-name">{item.name}</span></td>
+                <td>{item.user_a.length ? item.user_a.join(', ') : '—'}</td>
+                <td>{item.user_b.length ? item.user_b.join(', ') : '—'}</td>
+                <td>
+                  {item.missing_for_user_b.map((privilege) => <span key={`missing-${privilege}`} className="missing-badge">Missing {privilege}</span>)}
+                  {item.extra_for_user_b.map((privilege) => <span key={`extra-${privilege}`} className="source-badge inherited">Extra {privilege}</span>)}
+                  {!item.missing_for_user_b.length && !item.extra_for_user_b.length && <span className="source-badge direct">Matched</span>}
+                </td>
+              </tr>
+            ))}</tbody>
+          </table></div>
+        )}
+      </section>
+    );
+  }
 
   return (
     <section className="identity-section">
@@ -167,7 +197,7 @@ function CompareUsers({ exportedBy, embedded = false }) {
     setMessage('');
     setReport(null);
     try {
-      const response = await fetch(`${API_BASE}/users/compare?user1=${encodeURIComponent(userA)}&user2=${encodeURIComponent(userB)}&scan=false`);
+      const response = await fetch(`${API_BASE}/users/compare?user1=${encodeURIComponent(userA)}&user2=${encodeURIComponent(userB)}&scan=true&_=${Date.now()}`);
       const data = await response.json();
       setReport(data.success ? data : null);
       setMessage(data.success ? '' : data.message || 'Unable to compare users.');
