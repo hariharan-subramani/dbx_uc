@@ -288,7 +288,7 @@ def users(search: str = "", fresh: bool = Query(default=False)):
     return list_users(search, fresh=fresh)
 
 @app.get("/users/compare")
-def users_compare(user1: str, user2: str, scan: bool = Query(default=False)):
+def users_compare(user1: str, user2: str, scan: bool = Query(default=True)):
     return compare_users(user1, user2, scan_permissions=scan)
 
 @app.get("/users/{user}/access")

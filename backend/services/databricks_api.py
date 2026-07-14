@@ -1,6 +1,7 @@
 import os
 import requests
 import logging
+import json
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from functools import lru_cache
@@ -1151,6 +1152,7 @@ def get_user_access(user: str, scan_permissions: bool = True, fresh: bool = True
     groups = groups_result.get("groups", [])
     scan_started = datetime.now()
     scanned_objects = 0
+    permission_reads = 0
     scan_warnings: List[str] = []
     scan_complete = True
     access = {
@@ -1201,6 +1203,7 @@ def get_user_access(user: str, scan_permissions: bool = True, fresh: bool = True
         if not catalog_permissions.get("success"):
             scan_warnings.append(f"Catalog permissions unavailable for {catalog_name}.")
             continue
+        permission_reads += 1
         for permission in catalog_permissions.get("permissions", []):
             if _principal_matches(permission, user_info, groups):
                 _append_access(access, "catalogs", {
@@ -1229,6 +1232,8 @@ def get_user_access(user: str, scan_permissions: bool = True, fresh: bool = True
             schema_permissions = get_permissions("schema", full_schema, timeout=LIVE_SCAN_REQUEST_TIMEOUT)
             if not schema_permissions.get("success"):
                 scan_warnings.append(f"Schema permissions unavailable for {full_schema}.")
+            else:
+                permission_reads += 1
             for permission in schema_permissions.get("permissions", []):
                 if _principal_matches(permission, user_info, groups):
                     _append_access(access, "schemas", {
@@ -1260,6 +1265,8 @@ def get_user_access(user: str, scan_permissions: bool = True, fresh: bool = True
                 table_permissions = get_permissions("table", full_table, timeout=LIVE_SCAN_REQUEST_TIMEOUT)
                 if not table_permissions.get("success"):
                     scan_warnings.append(f"Table permissions unavailable for {full_table}.")
+                else:
+                    permission_reads += 1
                 for permission in table_permissions.get("permissions", []):
                     if _principal_matches(permission, user_info, groups):
                         _append_access(access, "tables", {
@@ -1287,6 +1294,8 @@ def get_user_access(user: str, scan_permissions: bool = True, fresh: bool = True
                 volume_permissions = get_permissions("volume", full_volume, timeout=LIVE_SCAN_REQUEST_TIMEOUT)
                 if not volume_permissions.get("success"):
                     scan_warnings.append(f"Volume permissions unavailable for {full_volume}.")
+                else:
+                    permission_reads += 1
                 for permission in volume_permissions.get("permissions", []):
                     if _principal_matches(permission, user_info, groups):
                         _append_access(access, "volumes", {
@@ -1302,6 +1311,16 @@ def get_user_access(user: str, scan_permissions: bool = True, fresh: bool = True
                 break
         if not scan_complete:
             break
+
+    if catalog_names and permission_reads == 0:
+        return {
+            "success": False,
+            "message": "Unable to load access information.",
+            "user": user_info,
+            "groups": groups,
+            "warnings": scan_warnings[:12],
+            **access,
+        }
 
     access["privileges"] = sorted(access["privileges"])
     if not scan_complete:
@@ -1554,23 +1573,57 @@ def _missing(source: List[str], target: List[str]) -> List[str]:
     return [item for item in source if item not in set(target)]
 
 
-def compare_users(user1: str, user2: str, scan_permissions: bool = False) -> Dict[str, Any]:
+def _compare_access_objects(first_items: List[Dict[str, Any]], second_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compare effective privileges for every securable and retain grant provenance."""
+    first_by_name = {item.get("name"): item for item in first_items if item.get("name")}
+    second_by_name = {item.get("name"): item for item in second_items if item.get("name")}
+    objects = []
+    for name in sorted(set(first_by_name) | set(second_by_name)):
+        first = first_by_name.get(name, {})
+        second = second_by_name.get(name, {})
+        first_privileges = sorted(set(first.get("privileges", [])))
+        second_privileges = sorted(set(second.get("privileges", [])))
+        objects.append({
+            "name": name,
+            "user_a": first_privileges,
+            "user_b": second_privileges,
+            "missing_for_user_b": _missing(first_privileges, second_privileges),
+            "extra_for_user_b": _missing(second_privileges, first_privileges),
+            "user_a_grant": {"source": first.get("source", ""), "principal": first.get("principal", "")},
+            "user_b_grant": {"source": second.get("source", ""), "principal": second.get("principal", "")},
+        })
+    return {
+        "user_a": sorted(first_by_name), "user_b": sorted(second_by_name),
+        "missing_for_user_b": _missing(sorted(first_by_name), sorted(second_by_name)),
+        "extra_for_user_b": _missing(sorted(second_by_name), sorted(first_by_name)),
+        "objects": objects,
+    }
+
+
+def _log_comparison_profile(label: str, profile: Dict[str, Any]) -> None:
+    for category in ("groups", "catalogs", "schemas", "tables", "volumes", "privileges"):
+        logger.debug("Compare Users %s %s: %s", label, category.title(), profile.get(category, []))
+
+
+def compare_users(user1: str, user2: str, scan_permissions: bool = True) -> Dict[str, Any]:
     """
     Compare two users' access profiles and recommend actions to align User B to User A.
     """
-    first = get_user_access(user1, scan_permissions=scan_permissions)
-    second = get_user_access(user2, scan_permissions=scan_permissions)
+    first = get_user_access(user1, scan_permissions=True, fresh=True)
+    second = get_user_access(user2, scan_permissions=True, fresh=True)
+    _log_comparison_profile("User A", first)
+    _log_comparison_profile("User B", second)
 
     if not first.get("success") or not second.get("success"):
         return {
             "success": False,
-            "message": "Unable to compare users because one or both access profiles could not be loaded.",
+            "message": "Unable to load access information.",
             "user_a": first,
             "user_b": second,
         }
 
     comparison = {}
-    for category in ("groups", "catalogs", "schemas", "tables"):
+    for category in ("groups",):
         a_values = _names(first.get(category, []))
         b_values = _names(second.get(category, []))
         comparison[category] = {
@@ -1579,6 +1632,9 @@ def compare_users(user1: str, user2: str, scan_permissions: bool = False) -> Dic
             "missing_for_user_b": _missing(a_values, b_values),
             "extra_for_user_b": _missing(b_values, a_values),
         }
+
+    for category in ("catalogs", "schemas", "tables", "volumes"):
+        comparison[category] = _compare_access_objects(first.get(category, []), second.get(category, []))
 
     a_privileges = sorted(set(first.get("privileges", [])))
     b_privileges = sorted(set(second.get("privileges", [])))
@@ -1594,23 +1650,26 @@ def compare_users(user1: str, user2: str, scan_permissions: bool = False) -> Dic
     for group in comparison["groups"]["missing_for_user_b"]:
         summary.append(f"{group} group")
         recommendations.append(f"Add User B to {group}")
-    for category in ("catalogs", "schemas", "tables"):
+    for category in ("catalogs", "schemas", "tables", "volumes"):
         label = category[:-1]
-        for item in comparison[category]["missing_for_user_b"]:
-            summary.append(f"{item} {label}")
+        for item in comparison[category]["objects"]:
+            for privilege in item["missing_for_user_b"]:
+                summary.append(f"{item['name']} {label}: {privilege} privilege")
     for privilege in comparison["privileges"]["missing_for_user_b"]:
         summary.append(f"{privilege} privilege")
         recommendations.append(f"Grant {privilege}")
 
-    return {
+    result = {
         "success": True,
-        "scan_complete": scan_permissions,
+        "scan_complete": bool(first.get("scan_complete") and second.get("scan_complete")),
         "user_a": first,
         "user_b": second,
         "comparison": comparison,
         "difference_summary": summary,
         "recommended_actions": recommendations,
     }
+    logger.debug("Compare Users final comparison JSON: %s", json.dumps(result, default=str))
+    return result
 
 
 def format_api_unavailable_message(error: str = "") -> str:
