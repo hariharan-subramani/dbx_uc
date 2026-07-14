@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import PermissionSearch from './PermissionSearch';
 import PermissionTable from './PermissionTable';
 import PermissionDialog from './PermissionDialog';
+import DataGovernanceAccordions from './DataGovernanceAccordions';
 import {
   exportCatalog,
   exportCatalogBinding,
@@ -50,10 +51,10 @@ function ObjectDetailsCard({
   exportedBy,
   onRefreshObject,
 }) {
-  const [isPermissionsOpen, setIsPermissionsOpen] = useState(true);
-  const [isBindingOpen, setIsBindingOpen] = useState(true);
-  const [isObjectsOpen, setIsObjectsOpen] = useState(true);
-  const [isStatisticsOpen, setIsStatisticsOpen] = useState(true);
+  const [isPermissionsOpen, setIsPermissionsOpen] = useState(false);
+  const [isBindingOpen, setIsBindingOpen] = useState(false);
+  const [isObjectsOpen, setIsObjectsOpen] = useState(false);
+  const [isStatisticsOpen, setIsStatisticsOpen] = useState(false);
   const [userSearch, setUserSearch] = useState('');
   const [groupSearch, setGroupSearch] = useState('');
   const [bindings, setBindings] = useState([]);
@@ -79,6 +80,16 @@ function ObjectDetailsCard({
     setPermissionActionMessage('');
     setPermissionActionError('');
   }, [objectType, objectName]);
+
+  useEffect(() => {
+    const closeLegacyAccordions = (event) => {
+      if (String(event.detail || '').startsWith('governance:')) {
+        setIsPermissionsOpen(false); setIsBindingOpen(false); setIsObjectsOpen(false); setIsStatisticsOpen(false);
+      }
+    };
+    window.addEventListener('data-explorer-accordion-open', closeLegacyAccordions);
+    return () => window.removeEventListener('data-explorer-accordion-open', closeLegacyAccordions);
+  }, []);
 
   const getTitle = () => {
     if (objectType === 'catalog') return 'Catalog Details';
@@ -110,8 +121,26 @@ function ObjectDetailsCard({
     return userMatches || groupMatches;
   });
 
-  const togglePermissions = () => setIsPermissionsOpen((current) => !current);
-  const toggleBinding = () => setIsBindingOpen((current) => !current);
+  const togglePermissions = () => {
+    if (!isPermissionsOpen) window.dispatchEvent(new CustomEvent('data-explorer-accordion-open', { detail: 'permissions' }));
+    setIsPermissionsOpen((current) => !current);
+    setIsBindingOpen(false); setIsObjectsOpen(false); setIsStatisticsOpen(false);
+  };
+  const toggleBinding = () => {
+    if (!isBindingOpen) window.dispatchEvent(new CustomEvent('data-explorer-accordion-open', { detail: 'binding' }));
+    setIsBindingOpen((current) => !current);
+    setIsPermissionsOpen(false); setIsObjectsOpen(false); setIsStatisticsOpen(false);
+  };
+  const toggleObjects = () => {
+    if (!isObjectsOpen) window.dispatchEvent(new CustomEvent('data-explorer-accordion-open', { detail: 'objects' }));
+    setIsObjectsOpen((current) => !current);
+    setIsPermissionsOpen(false); setIsBindingOpen(false); setIsStatisticsOpen(false);
+  };
+  const toggleStatistics = () => {
+    if (!isStatisticsOpen) window.dispatchEvent(new CustomEvent('data-explorer-accordion-open', { detail: 'statistics' }));
+    setIsStatisticsOpen((current) => !current);
+    setIsPermissionsOpen(false); setIsBindingOpen(false); setIsObjectsOpen(false);
+  };
 
   const handleExportCatalog = () => {
     exportCatalog({
@@ -290,7 +319,7 @@ function ObjectDetailsCard({
   };
 
   useEffect(() => {
-    if (objectType === 'catalog' && objectName) {
+    if (objectType === 'catalog' && objectName && isBindingOpen) {
       setBindings([]);
       setObjects([]);
       setStatistics(null);
@@ -311,10 +340,10 @@ function ObjectDetailsCard({
         })
         .finally(() => setLoadingExtra(false));
     }
-  }, [objectType, objectName, refreshToken]);
+  }, [objectType, objectName, refreshToken, isBindingOpen]);
 
   useEffect(() => {
-    if (objectType === 'schema' && objectName) {
+    if (objectType === 'schema' && objectName && isObjectsOpen) {
       setBindings([]);
       setObjects([]);
       setStatistics(null);
@@ -341,10 +370,10 @@ function ObjectDetailsCard({
         setLoadingExtra(false);
       }
     }
-  }, [objectType, objectName, selectedObject?.catalogName, objectDetails, refreshToken]);
+  }, [objectType, objectName, selectedObject?.catalogName, objectDetails, refreshToken, isObjectsOpen]);
 
   useEffect(() => {
-    if (objectType === 'table' && objectName) {
+    if (objectType === 'table' && objectName && isStatisticsOpen) {
       setBindings([]);
       setObjects([]);
       setStatistics(null);
@@ -372,10 +401,10 @@ function ObjectDetailsCard({
         setLoadingExtra(false);
       }
     }
-  }, [objectType, objectName, selectedObject?.catalogName, selectedObject?.schemaName, objectDetails, refreshToken]);
+  }, [objectType, objectName, selectedObject?.catalogName, selectedObject?.schemaName, objectDetails, refreshToken, isStatisticsOpen]);
 
   useEffect(() => {
-    if (objectType === 'volume' && objectName) {
+    if (objectType === 'volume' && objectName && isBindingOpen) {
       setBindings([]);
       setObjects([]);
       setStatistics(null);
@@ -398,7 +427,7 @@ function ObjectDetailsCard({
         setLoadingExtra(false);
       }
     }
-  }, [objectType, objectName, selectedObject?.catalogName, selectedObject?.schemaName, objectDetails, refreshToken]);
+  }, [objectType, objectName, selectedObject?.catalogName, selectedObject?.schemaName, objectDetails, refreshToken, isBindingOpen]);
 
   if (!selectedObject) return null;
 
@@ -628,10 +657,10 @@ function ObjectDetailsCard({
             role="button"
             tabIndex={0}
             className="accordion-header"
-            onClick={() => setIsObjectsOpen(!isObjectsOpen)}
+            onClick={toggleObjects}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
-                setIsObjectsOpen(!isObjectsOpen);
+                toggleObjects();
               }
             }}
           >
@@ -655,6 +684,7 @@ function ObjectDetailsCard({
                       <tr>
                         <th>Object Name</th>
                         <th>Object Type</th>
+                        <th>Owner</th>
                         <th>Created Date</th>
                       </tr>
                     </thead>
@@ -663,6 +693,7 @@ function ObjectDetailsCard({
                         <tr key={index}>
                           <td className="object-name">{obj.object_name}</td>
                           <td className="object-type">{obj.object_type}</td>
+                          <td>{obj.owner || 'Unavailable'}</td>
                           <td className="object-created">{formatDate(obj.created_date)}</td>
                         </tr>
                       ))}
@@ -683,10 +714,10 @@ function ObjectDetailsCard({
             role="button"
             tabIndex={0}
             className="accordion-header"
-            onClick={() => setIsStatisticsOpen(!isStatisticsOpen)}
+            onClick={toggleStatistics}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
-                setIsStatisticsOpen(!isStatisticsOpen);
+                toggleStatistics();
               }
             }}
           >
@@ -710,16 +741,16 @@ function ObjectDetailsCard({
                     <span className="stat-value">{statistics.total_rows?.toLocaleString() || 'N/A'}</span>
                   </div>
                   <div className="stat-item">
-                    <span className="stat-label">Total Columns</span>
-                    <span className="stat-value">{statistics.total_columns || 'N/A'}</span>
+                    <span className="stat-label">Number of Files</span>
+                    <span className="stat-value">{statistics.number_of_files || 'Unavailable'}</span>
                   </div>
                   <div className="stat-item">
                     <span className="stat-label">Storage Format</span>
                     <span className="stat-value">{statistics.storage_format || 'N/A'}</span>
                   </div>
                   <div className="stat-item">
-                    <span className="stat-label">Table Type</span>
-                    <span className="stat-value">{statistics.table_type || 'N/A'}</span>
+                    <span className="stat-label">Created Time</span>
+                    <span className="stat-value">{formatDate(statistics.created_time)}</span>
                   </div>
                   <div className="stat-item">
                     <span className="stat-label">Last Modified</span>
@@ -737,6 +768,8 @@ function ObjectDetailsCard({
           )}
         </div>
       )}
+
+      <DataGovernanceAccordions key={`${objectType}:${objectName}`} selectedObject={selectedObject} />
 
       {permissionDialog && (
         <PermissionDialog

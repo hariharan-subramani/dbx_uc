@@ -43,8 +43,21 @@ from services.databricks_api import (
     grant_permissions,
     update_principal_permissions,
     remove_principal_permissions,
+    get_catalog_governance,
+    get_schema_governance,
+    get_table_governance,
+    get_volume_governance,
 )
+from services.workspace_auth import WorkspaceAuthError, get_access_token
 from services.audit_service import list_permission_audits, record_permission_audit
+from services.governance_api import (
+    list_audit_history,
+    list_catalog_bindings,
+    list_external_locations,
+    list_governance_catalogs,
+    list_storage_credentials,
+    governance_summary,
+)
 
 app = FastAPI(title="Privacy Control Center API")
 logger = logging.getLogger(__name__)
@@ -144,6 +157,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("startup")
+def verify_databricks_connection():
+    try:
+        get_access_token()
+        logger.info("Databricks workspace OAuth authentication succeeded")
+    except WorkspaceAuthError as exc:
+        logger.error("Unable to connect to Databricks Workspace: %s", exc)
+
 @app.get("/")
 def api_home():
     return {
@@ -167,9 +189,78 @@ def api_home():
 def catalogs():
     return list_catalogs()
 
+@app.get("/governance/summary")
+def governance_summary_endpoint():
+    return governance_summary()
+
+@app.get("/governance/unity-catalogs")
+@app.get("/governance/catalogs", include_in_schema=False)
+def governance_catalogs():
+    return list_governance_catalogs()
+
+@app.get("/governance/storage-credentials")
+def governance_storage_credentials():
+    return list_storage_credentials()
+
+@app.get("/governance/external-locations")
+def governance_external_locations():
+    return list_external_locations()
+
+@app.get("/governance/catalog-bindings")
+def governance_catalog_bindings():
+    return list_catalog_bindings()
+
+@app.get("/governance/audit-history")
+@app.get("/governance/audit", include_in_schema=False)
+def governance_audit():
+    return list_audit_history()
+
 @app.get("/catalogs/{catalog_name}/schemas")
 def schemas(catalog_name: str):
     return list_schemas(catalog_name)
+
+def _governance_envelope(result: dict, section: str) -> dict:
+    """Keep object pages usable when one optional governance subsection fails."""
+    failed = not result.get("success")
+    section_error = f"{section.replace('-', ' ').title()} unavailable"
+    envelope = {
+        "success": True,
+        "basic_information": result.get("basic_information") or {},
+        "permissions": result.get("permissions") or [],
+        "storage_information": result.get("storage_information"),
+        "external_locations": result.get("external_locations") or [],
+        "parent_catalog": result.get("parent_catalog") or {},
+        "errors": [section_error] if failed else [],
+        **result,
+    }
+    envelope["success"] = True
+    envelope["section_available"] = not failed
+    envelope["errors"] = [section_error] if failed else result.get("errors", [])
+    if section == "storage" and result.get("information") is not None:
+        envelope["storage_information"] = result.get("information")
+    if section == "parent-catalog" and result.get("information") is not None:
+        envelope["parent_catalog"] = result.get("information")
+    return envelope
+
+@app.get("/data-governance/catalogs/{catalog_name}")
+def catalog_governance(catalog_name: str, section: str = Query(...)):
+    logger.info("Loading catalog governance: catalog=%s section=%s", catalog_name, section)
+    return _governance_envelope(get_catalog_governance(catalog_name, section), section)
+
+@app.get("/data-governance/catalogs/{catalog_name}/schemas/{schema_name}")
+def schema_governance(catalog_name: str, schema_name: str, section: str = Query(...)):
+    logger.info("Loading schema governance: catalog=%s schema=%s section=%s", catalog_name, schema_name, section)
+    return _governance_envelope(get_schema_governance(catalog_name, schema_name, section), section)
+
+@app.get("/data-governance/catalogs/{catalog_name}/schemas/{schema_name}/tables/{table_name}")
+def table_governance(catalog_name: str, schema_name: str, table_name: str, section: str = Query(...)):
+    logger.info("Loading table governance: catalog=%s schema=%s table=%s section=%s", catalog_name, schema_name, table_name, section)
+    return _governance_envelope(get_table_governance(catalog_name, schema_name, table_name, section), section)
+
+@app.get("/data-governance/catalogs/{catalog_name}/schemas/{schema_name}/volumes/{volume_name}")
+def volume_governance(catalog_name: str, schema_name: str, volume_name: str, section: str = Query(...)):
+    logger.info("Loading volume governance: catalog=%s schema=%s volume=%s section=%s", catalog_name, schema_name, volume_name, section)
+    return _governance_envelope(get_volume_governance(catalog_name, schema_name, volume_name, section), section)
 
 @app.get("/catalogs/{catalog_name}/schemas/{schema_name}/tables")
 def tables(catalog_name: str, schema_name: str):
@@ -267,6 +358,7 @@ def group_profile(group_name: str):
 @app.get("/workspace")
 def workspace():
     return get_workspace()
+
 
 @app.get("/catalogs/{catalog_name}/metadata")
 def catalog_metadata(catalog_name: str):

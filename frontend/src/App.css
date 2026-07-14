@@ -145,6 +145,13 @@ body {
   background: #f9fafb;
 }
 
+.workspace-selector-detail {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-muted, #667085);
+  font-size: 0.75rem;
+}
+
 .workspace-icon {
   width: 32px;
   height: 32px;
@@ -356,6 +363,50 @@ kbd {
   background: #fef2f2;
   box-shadow: inset 0 0 0 1px #fecaca;
 }
+
+/* Governance Explorer */
+.governance-cards { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 14px; margin-bottom: 22px; }
+.governance-card { min-height: 128px; padding: 18px; text-align: left; background: #fff; border: 1px solid #e8eaed; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.04); transition: .2s ease; }
+.governance-card:hover, .governance-card.active { border-color: #fca5a5; transform: translateY(-2px); box-shadow: 0 5px 14px rgba(0,0,0,.07); }
+.governance-card span, .governance-card small { display: block; color: #6b7280; }
+.governance-card span { font-size: 12px; font-weight: 700; }
+.governance-card strong { display: block; margin: 10px 0 5px; color: #111827; font-size: 28px; }
+.governance-card small { font-size: 10.5px; }
+.governance-section-nav { position: sticky; top: 8px; z-index: 5; display: flex; gap: 5px; margin-bottom: 18px; padding: 6px; overflow-x: auto; background: rgba(255,255,255,.96); border: 1px solid #e8eaed; border-radius: 10px; }
+.governance-section-nav button { flex: 1 0 auto; padding: 9px 12px; color: #4b5563; border-radius: 7px; font-size: 12px; font-weight: 700; }
+.governance-section-nav button:hover, .governance-section-nav button.active { color: #dc2626; background: #fef2f2; }
+.governance-sections { display: grid; gap: 22px; }
+.governance-panel { position: relative; overflow: hidden; background: #fff; border: 1px solid #e8eaed; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.04); scroll-margin-top: 75px; }
+.governance-panel-header { display: flex; justify-content: space-between; gap: 20px; padding: 20px; border-bottom: 1px solid #e8eaed; }
+.governance-panel-header h2 { margin-bottom: 5px; color: #111827; font-size: 18px; }
+.governance-panel-header p { color: #6b7280; font-size: 12.5px; }
+.governance-actions { display: flex; align-items: center; gap: 8px; }
+.governance-actions .primary-button { height: 34px; padding: 0 14px; }
+.governance-search { display: flex; align-items: center; gap: 12px; margin: 14px 20px; color: #4b5563; font-size: 12px; font-weight: 700; }
+.governance-search input { width: min(360px, 100%); height: 36px; padding: 0 12px; border: 1px solid #d1d5db; border-radius: 8px; outline: none; }
+.governance-search input:focus { border-color: #dc2626; box-shadow: 0 0 0 3px rgba(220,38,38,.1); }
+.governance-table-wrap { overflow-x: auto; }
+.governance-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.governance-table th { padding: 11px 14px; color: #4b5563; background: #f9fafb; border-block: 1px solid #e8eaed; text-align: left; white-space: nowrap; }
+.governance-table td { max-width: 310px; padding: 12px 14px; color: #374151; border-bottom: 1px solid #eef0f2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.governance-table tbody tr { cursor: pointer; }
+.governance-table tbody tr:hover, .governance-table tbody tr.selected { background: #fff7f7; }
+.governance-table .governance-empty { padding: 30px; color: #9ca3af; text-align: center; cursor: default; }
+.governance-inline-error, .governance-inline-warning { margin: 0 20px 14px; padding: 10px 12px; border-radius: 8px; font-size: 12px; }
+.governance-inline-error { color: #991b1b; background: #fef2f2; }
+.governance-inline-warning { color: #92400e; background: #fffbeb; }
+.governance-details { padding: 20px; background: #fafbfc; border-top: 1px solid #e8eaed; }
+.governance-details-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.governance-details-title h3 { font-size: 15px; }
+.governance-details-title button { width: 28px; height: 28px; color: #6b7280; border-radius: 6px; font-size: 22px; }
+.governance-details-title button:hover { background: #e5e7eb; }
+.governance-details dl { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 12px; }
+.governance-details dl div { padding: 12px; background: #fff; border: 1px solid #e8eaed; border-radius: 8px; }
+.governance-details dt { margin-bottom: 5px; color: #6b7280; font-size: 10.5px; font-weight: 700; text-transform: uppercase; }
+.governance-details dd { color: #1f2937; font-size: 12.5px; overflow-wrap: anywhere; }
+
+@media (max-width: 1100px) { .governance-cards { grid-template-columns: repeat(3, 1fr); } .governance-details dl { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 700px) { .governance-cards { grid-template-columns: 1fr 1fr; } .governance-panel-header { flex-direction: column; } .governance-actions { flex-wrap: wrap; } }
 
 .page-heading {
   display: flex;
@@ -599,7 +650,7 @@ kbd {
 
 .explorer-layout {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 320px minmax(0, 1fr);
   min-height: 600px;
 }
 
@@ -614,6 +665,7 @@ kbd {
   background: #ffffff;
   padding: 24px;
   overflow-y: auto;
+  min-width: 0;
   max-height: calc(100vh - 200px);
 }
 
@@ -942,12 +994,20 @@ kbd {
   }
 
   .main {
-    margin-left: 72px;
-    width: calc(100% - 72px);
+    margin-left: 0;
+    width: 100%;
   }
 
   .content {
-    padding: 24px 20px 40px;
+    padding: 20px 14px 36px;
+  }
+
+  .explorer-right {
+    padding: 16px 12px;
+  }
+
+  .governance-info-grid {
+    grid-template-columns: 1fr;
   }
 
   .user-summary {
@@ -985,7 +1045,7 @@ kbd {
   }
 
   .content {
-    padding: 20px 16px 32px;
+    padding: 16px 8px 28px;
   }
 
   .page-heading h1 {
@@ -1038,6 +1098,9 @@ kbd {
    Object Details Card
    ======================================== */
 .object-details-card {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   background: #ffffff;
   border: 1px solid #e8eaed;
   border-radius: 12px;
@@ -1185,11 +1248,29 @@ kbd {
 }
 
 .accordion-content {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   padding: 0 24px 24px;
   background: #fafbfc;
   border-top: 1px solid #e8eaed;
   animation: slideDown 0.3s ease;
 }
+
+.governance-object-accordion { border-top: 1px solid #e8eaed; }
+.governance-accordion-body { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows .25s ease, opacity .2s ease; }
+.governance-accordion-body > .accordion-content { min-height: 0; overflow: hidden; padding-top: 0; padding-bottom: 0; }
+.governance-accordion-body.open { grid-template-rows: 1fr; opacity: 1; }
+.governance-accordion-body.open > .accordion-content { padding-top: 20px; padding-bottom: 20px; }
+.governance-info-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.governance-info-grid > div { padding: 14px; background: #f9fafb; border: 1px solid #e8eaed; border-radius: 8px; }
+.governance-info-grid span, .governance-info-grid strong { display: block; }
+.governance-info-grid span { margin-bottom: 6px; color: #6b7280; font-size: 11px; font-weight: 600; }
+.governance-info-grid strong { color: #1f2937; font-size: 13px; overflow-wrap: anywhere; }
+.governance-placeholder { padding: 18px; color: #6b7280; background: #f9fafb; border: 1px dashed #d1d5db; border-radius: 8px; }
+.governance-placeholder strong { color: #374151; font-size: 13px; }
+.governance-placeholder p { margin-top: 6px; font-size: 12px; line-height: 1.5; }
 
 @keyframes slideDown {
   from {
@@ -1216,6 +1297,8 @@ kbd {
 .bundles-table,
 .objects-table {
   width: 100%;
+  max-width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -1235,6 +1318,8 @@ kbd {
   color: #374151;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .bundles-table tbody tr,
@@ -1257,6 +1342,9 @@ kbd {
 .objects-table td {
   padding: 14px 16px;
   vertical-align: middle;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .bundle-name,
@@ -1627,6 +1715,8 @@ kbd {
 
 .permission-table {
   width: 100%;
+  max-width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -1640,6 +1730,8 @@ kbd {
   padding: 12px 16px;
   text-align: left;
   font-size: 11px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   font-weight: 700;
   color: #374151;
   text-transform: uppercase;
@@ -2777,11 +2869,11 @@ kbd {
   }
 
   .accordion-header {
-    padding: 14px 20px;
+    padding: 14px 12px;
   }
 
   .accordion-content {
-    padding: 0 20px 20px;
+    padding: 0 8px 16px;
   }
 
   .bundles-table th,
