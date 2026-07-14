@@ -25,9 +25,12 @@ const formatDate = (value) => {
       }).format(date);
 };
 
-const fetchJson = async (path) => {
-  const response = await fetch(`${API_BASE}${path}`);
-  if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
+const fetchJson = async (path, options) => {
+  const response = await fetch(`${API_BASE}${path}`, options);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.detail || `Request failed with status ${response.status}`);
+  }
   return response.json();
 };
 
@@ -37,7 +40,7 @@ function Explorer({ user }) {
   const isNavigatingFromURL = useRef(false);
 
   const [workspaces, setWorkspaces] = useState([]);
-  const [selectedWorkspace, setSelectedWorkspace] = useState(workspace || '');
+  const [selectedWorkspace, setSelectedWorkspace] = useState('');
   const [catalogs, setCatalogs] = useState([]);
   const [selectedCatalog, setSelectedCatalog] = useState(catalog || '');
   const [schemas, setSchemas] = useState([]);
@@ -71,21 +74,22 @@ function Explorer({ user }) {
     fetchJson('/workspace')
       .then((data) => {
         if (!isActive) return;
+        if (!data.success) throw new Error(data.message || 'Unable to connect to Databricks Workspace.');
         const nextWorkspaces = (data.workspaces || []).map((item) => ({
-          label: item.display_name || item.name || 'Databricks Workspace',
-          value: item.host || item.workspace_id || item.name,
-          host: item.host,
-          workspaceId: item.workspace_id,
+          label: item.display_name || item.name || item.deployment_name,
+          value: String(item.workspace_id || item.deployment_name || ''),
+          host: item.host || item.workspace_url,
+          workspaceId: String(item.workspace_id || ''),
         })).filter((item) => item.value);
         setWorkspaces(nextWorkspaces);
-        if (!selectedWorkspace && nextWorkspaces.length === 1) {
+        if (nextWorkspaces[0]) {
           setSelectedWorkspace(nextWorkspaces[0].value);
-          navigate(`/workspace/${encodeURIComponent(nextWorkspaces[0].value)}`);
+          if (!workspace) navigate(`/workspace/${encodeURIComponent(nextWorkspaces[0].value)}`);
         }
       })
       .catch((err) => {
         if (!isActive) return;
-        setError('Workspace information is unavailable.');
+        setError('Unable to connect to Databricks Workspace.');
         console.error('Error loading workspace:', err);
       })
       .finally(() => {
@@ -103,7 +107,6 @@ function Explorer({ user }) {
       return;
     }
 
-    setSelectedWorkspace(workspace || '');
     setSelectedCatalog(catalog || '');
     setSelectedSchema(schema || '');
     setSelectedTable(table || '');
@@ -117,25 +120,25 @@ function Explorer({ user }) {
   }, [selectedWorkspace]);
 
   useEffect(() => {
-    if (selectedCatalog) {
+    if (selectedWorkspace && selectedCatalog) {
       loadCatalogSelection(selectedCatalog);
     }
-  }, [selectedCatalog]);
+  }, [selectedWorkspace, selectedCatalog]);
 
   useEffect(() => {
-    if (selectedCatalog && selectedSchema) {
+    if (selectedWorkspace && selectedCatalog && selectedSchema) {
       loadSchemaSelection(selectedCatalog, selectedSchema);
     }
   }, [selectedCatalog, selectedSchema]);
 
   useEffect(() => {
-    if (selectedCatalog && selectedSchema && selectedTable) {
+    if (selectedWorkspace && selectedCatalog && selectedSchema && selectedTable) {
       loadTableSelection(selectedCatalog, selectedSchema, selectedTable);
     }
   }, [selectedCatalog, selectedSchema, selectedTable]);
 
   useEffect(() => {
-    if (selectedCatalog && selectedSchema && selectedVolume) {
+    if (selectedWorkspace && selectedCatalog && selectedSchema && selectedVolume) {
       loadVolumeSelection(selectedCatalog, selectedSchema, selectedVolume);
     }
   }, [selectedCatalog, selectedSchema, selectedVolume]);
@@ -356,26 +359,6 @@ function Explorer({ user }) {
     }
   }
 
-  const handleSelectWorkspace = (workspaceName) => {
-    isNavigatingFromURL.current = true;
-    setSelectedWorkspace(workspaceName);
-    setSelectedCatalog('');
-    setSelectedSchema('');
-    setSelectedTable('');
-    setSelectedVolume('');
-    setCatalogs([]);
-    setSchemas([]);
-    setTables([]);
-    setVolumes([]);
-    setSelectedObject(null);
-    setObjectDetails(null);
-    setPermissions(null);
-    setPermissionsMessage('');
-    setLoadingPermissions(false);
-
-    navigate(workspaceName ? `/workspace/${encodeURIComponent(workspaceName)}` : '/');
-  };
-
   const handleSelectCatalog = (catalogName) => {
     isNavigatingFromURL.current = true;
     setSelectedCatalog(catalogName);
@@ -457,7 +440,6 @@ function Explorer({ user }) {
             <WorkspaceSelector
               workspaces={workspaces}
               selectedWorkspace={selectedWorkspace}
-              onSelectWorkspace={handleSelectWorkspace}
               loading={loadingWorkspace}
             />
             <CatalogSelector

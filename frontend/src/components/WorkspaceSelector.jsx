@@ -1,11 +1,6 @@
 import Icon from './Icon';
 
-function WorkspaceSelector({ workspaces, selectedWorkspace, onSelectWorkspace, loading }) {
-  const handleChange = (e) => {
-    const value = e.target.value;
-    onSelectWorkspace(value);
-  };
-
+function WorkspaceSelector({ workspaces, selectedWorkspace, loading }) {
   return (
     <div className="selector-section">
       <label className="selector-label">
@@ -15,18 +10,20 @@ function WorkspaceSelector({ workspaces, selectedWorkspace, onSelectWorkspace, l
       <div className="selector-dropdown">
         <select
           value={selectedWorkspace}
-          onChange={handleChange}
-          disabled={loading || workspaces.length === 0}
+          onChange={() => {}}
+          disabled
           className="selector-select"
+          aria-label={loading ? 'Connecting to Databricks workspace' : 'Connected Databricks workspace'}
         >
-          <option value="">Select workspace</option>
+          {!selectedWorkspace && (
+            <option value="">{loading ? 'Connecting...' : 'Workspace unavailable'}</option>
+          )}
           {workspaces.map((workspace) => (
             <option key={workspace.value} value={workspace.value}>
               {workspace.label}
             </option>
           ))}
         </select>
-        <Icon name="chevron" size={16} className="selector-chevron" />
       </div>
     </div>
   );

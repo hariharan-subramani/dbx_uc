@@ -1,18 +1,15 @@
-import os
 import traceback
-from dotenv import load_dotenv
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
+from services.workspace_auth import get_workspace_credentials
 
-load_dotenv()
-
-w = WorkspaceClient(
-    host=os.getenv("DATABRICKS_HOST"),
-    token=os.getenv("DATABRICKS_TOKEN")
-)
+def _workspace_client():
+    host, token = get_workspace_credentials()
+    return WorkspaceClient(host=host, token=token)
 
 def list_catalogs():
     try:
+        w = _workspace_client()
         catalogs = [c.name for c in w.catalogs.list()]
 
         return {
@@ -29,6 +26,7 @@ def list_catalogs():
 
 def list_schemas(catalog_name):
     try:
+        w = _workspace_client()
         schemas = [
             {
                 "name": schema.name,
@@ -53,6 +51,7 @@ def list_schemas(catalog_name):
 
 def list_tables(catalog_name, schema_name):
     try:
+        w = _workspace_client()
         tables = [
             {
                 "name": table.name,
@@ -83,6 +82,7 @@ def list_tables(catalog_name, schema_name):
 
 def preview_table_data(catalog_name, schema_name, table_name, limit=25):
     try:
+        w = _workspace_client()
         warehouses = list(w.warehouses.list())
         if not warehouses:
             return {

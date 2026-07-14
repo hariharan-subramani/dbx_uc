@@ -87,6 +87,15 @@ const downloadWorkbook = (workbook, filename) => {
 
 const createWorkbook = () => XLSX.utils.book_new();
 
+export const exportGovernanceRows = ({ rows, columns, sheetName, filename, emptyMessage }) => {
+  const workbook = createWorkbook();
+  const exportRows = (rows || []).map((row) => Object.fromEntries(
+    columns.map((column) => [column.label, row[column.key] ?? '']),
+  ));
+  appendSheet(workbook, sheetName, sheetFromRows(exportRows, emptyMessage || 'No records available.'));
+  downloadWorkbook(workbook, filename);
+};
+
 export const toPermissionRows = (permissions = []) => permissions.map((permission) => ({
   Principal: permission.principal || '',
   Type: permission.principal_type || '',
@@ -102,6 +111,7 @@ export const toCatalogBindingRows = (bindings = []) => bindings.map((binding) =>
 export const toSchemaObjectRows = (objects = []) => objects.map((object) => ({
   'Object Name': object.object_name || '',
   'Object Type': object.object_type || '',
+  Owner: object.owner || '',
   'Created Date': object.created_date || '',
 }));
 

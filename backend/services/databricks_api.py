@@ -5,26 +5,29 @@ from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from functools import lru_cache
 from datetime import datetime, timedelta
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
+from services.workspace_auth import (
+    WorkspaceAuthError,
+    get_workspace_credentials,
+    refresh_workspace_credentials,
+    workspace_identity,
+)
 
 load_dotenv()
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Databricks configuration
-DATABRICKS_HOST = os.getenv("DATABRICKS_HOST", "").rstrip("/")
-DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN", "")
-
 # Simple in-memory cache for API responses
 _cache = {}
-CACHE_DURATION = timedelta(minutes=5)
-LIVE_SCAN_MAX_SECONDS = int(os.getenv("USER_ACCESS_SCAN_MAX_SECONDS", "15"))
-LIVE_SCAN_REQUEST_TIMEOUT = int(os.getenv("USER_ACCESS_SCAN_REQUEST_TIMEOUT", "4"))
-LIVE_SCAN_MAX_OBJECTS = int(os.getenv("USER_ACCESS_SCAN_MAX_OBJECTS", "250"))
+# Governance views should reflect the connected workspace on every request.
+CACHE_DURATION = timedelta(seconds=0)
+LIVE_SCAN_MAX_SECONDS = int(os.getenv("USER_ACCESS_SCAN_MAX_SECONDS", "60"))
+LIVE_SCAN_REQUEST_TIMEOUT = int(os.getenv("USER_ACCESS_SCAN_REQUEST_TIMEOUT", "10"))
+LIVE_SCAN_MAX_OBJECTS = int(os.getenv("USER_ACCESS_SCAN_MAX_OBJECTS", "1000"))
 
 
-def get_auth_headers() -> Dict[str, str]:
+def get_auth_headers(token: str) -> Dict[str, str]:
     """
     Get authentication headers for Databricks REST API requests.
     
@@ -32,7 +35,7 @@ def get_auth_headers() -> Dict[str, str]:
         Dict with Authorization and Content-Type headers
     """
     return {
-        "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
@@ -57,21 +60,42 @@ def make_request(
     Returns:
         Dict with success status, data/error, and status code
     """
-    url = f"{DATABRICKS_HOST}{endpoint}"
-    
     try:
+        workspace_host, token = get_workspace_credentials()
+        url = f"{workspace_host}{endpoint}"
         logger.info(f"Making {method} request to: {url}")
         
         response = requests.request(
             method=method,
             url=url,
-            headers=get_auth_headers(),
+            headers=get_auth_headers(token),
             params=params,
             json=json_data,
             timeout=timeout
         )
         
         logger.info(f"Response status: {response.status_code}")
+
+        # A token can be revoked before its advertised expiry. Refresh once and
+        # retry transparently so callers never need to restart the application.
+        if response.status_code == 401:
+            workspace_host, token = refresh_workspace_credentials()
+            url = f"{workspace_host}{endpoint}"
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=get_auth_headers(token),
+                params=params,
+                json=json_data,
+                timeout=timeout,
+            )
+            logger.info("Retry response status: %s", response.status_code)
+
+        try:
+            parsed_response = response.json()
+            logger.info("Parsed Databricks response for %s: %s", endpoint, parsed_response)
+        except ValueError:
+            logger.info("Databricks response for %s was not JSON: %s", endpoint, response.text[:1000])
         
         # Handle successful responses
         if response.status_code in [200, 201]:
@@ -92,7 +116,12 @@ def make_request(
         except:
             error_msg = response.text or error_msg
         
-        logger.error(f"API error: {error_msg}")
+        logger.error(
+            "Databricks REST request failed: endpoint=%s status=%s error=%s",
+            endpoint,
+            response.status_code,
+            error_msg,
+        )
         
         return {
             "success": False,
@@ -101,6 +130,9 @@ def make_request(
             "status_code": response.status_code
         }
     
+    except WorkspaceAuthError as exc:
+        return {"success": False, "error": str(exc), "status_code": 409}
+
     except requests.exceptions.Timeout:
         error_msg = f"Request timeout after {timeout}s"
         logger.error(error_msg)
@@ -159,12 +191,13 @@ def get_current_user() -> Dict[str, Any]:
             "active": True
         }
     
-    # Return default user if all API calls fail
-    logger.warning("Using fallback user information")
+    logger.warning("Unable to retrieve the authenticated Databricks identity")
     return {
-        "user": "hariharansubramani325@gmail.com",
-        "display_name": "Workspace User",
-        "active": True
+        "success": False,
+        "user": "",
+        "display_name": "",
+        "active": False,
+        "message": "Unable to connect to Databricks Workspace.",
     }
 
 
@@ -172,20 +205,21 @@ def get_workspace() -> Dict[str, Any]:
     """
     Return the configured Databricks workspace identity for the frontend selector.
     """
-    parsed_host = urlparse(DATABRICKS_HOST)
-    workspace_host = parsed_host.netloc or parsed_host.path
-
-    return {
-        "success": True,
-        "workspaces": [
-            {
-                "name": os.getenv("DATABRICKS_WORKSPACE_NAME", "Databricks Workspace"),
-                "display_name": os.getenv("DATABRICKS_WORKSPACE_NAME", "Databricks Workspace"),
-                "host": DATABRICKS_HOST,
-                "workspace_id": os.getenv("DATABRICKS_WORKSPACE_ID", workspace_host or ""),
-            }
-        ],
-    }
+    verification = make_request("GET", "/api/2.0/workspace/get-status", params={"path": "/"})
+    if not verification.get("success"):
+        return {
+            "success": False,
+            "message": "Unable to connect to Databricks Workspace.",
+            "error": verification.get("error"),
+            "workspaces": [],
+        }
+    workspace = workspace_identity()
+    return {"success": True, "connected": True, "workspaces": [{
+        **workspace,
+        "name": workspace["workspace_name"],
+        "display_name": workspace["workspace_name"],
+        "host": workspace["workspace_url"],
+    }]}
 
 
 def _identity_from_scim_user(user_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -969,9 +1003,14 @@ def _principal_matches(permission: Dict[str, Any], user_info: Dict[str, Any], gr
     }
     group_names = {str(group.get("name") or "").lower() for group in groups}
 
+    # Every account identity assigned to a workspace is a member of the
+    # Databricks built-in `account users` principal. It is not always returned
+    # in the user's SCIM group memberships, so account for it explicitly.
+    built_in_account_user = principal_type == "group" and principal == "account users"
     return (
         (principal_type == "user" and principal in user_names)
         or (principal_type == "group" and principal in group_names)
+        or built_in_account_user
     )
 
 
@@ -980,18 +1019,17 @@ def _permission_source(permission: Dict[str, Any]) -> str:
 
 
 def _append_access(access: Dict[str, List[Dict[str, Any]]], category: str, item: Dict[str, Any]) -> None:
-    item_key = (
-        str(item.get("name") or "").lower(),
-        str(item.get("principal") or "").lower(),
-        tuple(sorted(item.get("privileges") or [])),
-    )
+    item_name = str(item.get("name") or "").lower()
     for existing in access.get(category, []):
-        existing_key = (
-            str(existing.get("name") or "").lower(),
-            str(existing.get("principal") or "").lower(),
-            tuple(sorted(existing.get("privileges") or [])),
-        )
-        if existing_key == item_key:
+        if str(existing.get("name") or "").lower() == item_name:
+            existing["privileges"] = sorted(set(existing.get("privileges", [])) | set(item.get("privileges", [])))
+            sources = set(str(existing.get("source") or "").split(" + ")) | {str(item.get("source") or "")}
+            existing["source"] = " + ".join(sorted(source for source in sources if source))
+            principals = set(str(existing.get("principal") or "").split(", ")) | {str(item.get("principal") or "")}
+            existing["principal"] = ", ".join(sorted(principal for principal in principals if principal))
+            for privilege in item.get("privileges", []):
+                if privilege and privilege not in access["privileges"]:
+                    access["privileges"].append(privilege)
             return
 
     access[category].append(item)
@@ -1152,14 +1190,17 @@ def get_user_access(user: str, scan_permissions: bool = True, fresh: bool = True
             **access,
         }
 
-    for catalog_name in catalogs_result.get("catalogs", []):
-        if should_stop_scan():
-            scan_complete = False
-            break
+    catalog_names = catalogs_result.get("catalogs", [])
+
+    # Scan every catalog before descending into schemas and tables. Previously,
+    # a large first catalog could consume the entire time budget and make later
+    # directly granted catalogs incorrectly appear as zero access.
+    for catalog_name in catalog_names:
         scanned_objects += 1
         catalog_permissions = get_permissions("catalog", catalog_name, timeout=LIVE_SCAN_REQUEST_TIMEOUT)
         if not catalog_permissions.get("success"):
             scan_warnings.append(f"Catalog permissions unavailable for {catalog_name}.")
+            continue
         for permission in catalog_permissions.get("permissions", []):
             if _principal_matches(permission, user_info, groups):
                 _append_access(access, "catalogs", {
@@ -1169,6 +1210,10 @@ def get_user_access(user: str, scan_permissions: bool = True, fresh: bool = True
                     "principal": permission.get("principal"),
                 })
 
+    for catalog_name in catalog_names:
+        if should_stop_scan():
+            scan_complete = False
+            break
         schemas_result = list_schemas(catalog_name, fresh=fresh, timeout=LIVE_SCAN_REQUEST_TIMEOUT)
         if not schemas_result.get("success"):
             scan_warnings.append(f"Schemas unavailable for {catalog_name}.")
@@ -2226,6 +2271,9 @@ def _normalize_volume(volume: Dict[str, Any]) -> Dict[str, Any]:
         "comment": volume.get("comment"),
         "created_at": volume.get("created_at"),
         "storage_location": volume.get("storage_location"),
+        "storage_credential": volume.get("storage_credential_name") or volume.get("credential_name"),
+        "external_location": volume.get("external_location_name"),
+        "read_only": volume.get("read_only"),
     }
 
 
@@ -2288,6 +2336,8 @@ def get_catalog_metadata(catalog_name: str) -> Dict[str, Any]:
                 "comment": catalog_data.get("comment"),
                 "created_at": catalog_data.get("created_at"),
                 "updated_at": catalog_data.get("updated_at"),
+                "storage_location": catalog_data.get("storage_root") or catalog_data.get("storage_location"),
+                "storage_root": catalog_data.get("storage_root") or catalog_data.get("storage_location"),
             }
         }
     
@@ -2309,7 +2359,8 @@ def get_schema_metadata(catalog_name: str, schema_name: str) -> Dict[str, Any]:
     Returns:
         Dict with schema metadata
     """
-    result = make_request("GET", f"/api/2.1/unity-catalog/schemas/{quote(catalog_name)}/{quote(schema_name)}")
+    full_name = f"{catalog_name}.{schema_name}"
+    result = make_request("GET", f"/api/2.1/unity-catalog/schemas/{quote(full_name, safe='')}")
     
     if result["success"]:
         schema_data = result["data"]
@@ -2322,6 +2373,9 @@ def get_schema_metadata(catalog_name: str, schema_name: str) -> Dict[str, Any]:
                 "comment": schema_data.get("comment"),
                 "created_at": schema_data.get("created_at"),
                 "updated_at": schema_data.get("updated_at"),
+                "storage_location": schema_data.get("storage_root") or schema_data.get("storage_location"),
+                "storage_type": "External" if schema_data.get("storage_root") else "Managed",
+                "storage_credential": schema_data.get("storage_credential_name") or schema_data.get("credential_name"),
             }
         }
     
@@ -2344,7 +2398,8 @@ def get_table_metadata(catalog_name: str, schema_name: str, table_name: str) -> 
     Returns:
         Dict with table metadata
     """
-    result = make_request("GET", f"/api/2.1/unity-catalog/tables/{quote(catalog_name)}/{quote(schema_name)}/{quote(table_name)}")
+    full_name = f"{catalog_name}.{schema_name}.{table_name}"
+    result = make_request("GET", f"/api/2.1/unity-catalog/tables/{quote(full_name, safe='')}")
     
     if result["success"]:
         table_data = result["data"]
@@ -2406,7 +2461,7 @@ def get_permissions(object_type: str, object_name: str, timeout: int = 30) -> Di
     """
     result = make_request(
         "GET",
-        f"/api/2.1/unity-catalog/permissions/{object_type}/{quote(object_name)}",
+        f"/api/2.1/unity-catalog/permissions/{object_type}/{quote(object_name, safe='')}",
         timeout=timeout,
     )
     
@@ -2600,6 +2655,7 @@ def get_schema_objects(catalog_name: str, schema_name: str) -> Dict[str, Any]:
             objects.append({
                 "object_name": table.get("name"),
                 "object_type": table.get("table_type", "TABLE"),
+                "owner": table.get("owner"),
                 "created_date": table.get("created_at"),
             })
         
@@ -2658,7 +2714,10 @@ def get_table_statistics(catalog_name: str, schema_name: str, table_name: str) -
                 "storage_format": metadata.get("data_source_format"),
                 "table_type": metadata.get("table_type"),
                 "last_modified": metadata.get("updated_at"),
+                "created_time": metadata.get("created_at"),
                 "size_in_mb": size_in_mb,
+                "table_size": f"{size_in_mb} MB" if size_in_mb is not None else None,
+                "number_of_files": properties.get("numFiles") or properties.get("delta.numFiles"),
             }
         }
 
@@ -2670,6 +2729,221 @@ def get_table_statistics(catalog_name: str, schema_name: str, table_name: str) -
         ),
         "status_code": metadata_result.get("status_code")
     }
+
+
+def _unavailable(value: Any) -> Any:
+    return value if value not in (None, "", []) else "Unavailable"
+
+
+def _governance_error(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "message": "Unable to load governance information.",
+        "status_code": result.get("status_code"),
+    }
+
+
+def _list_uc_resource(endpoint: str, key: str) -> Dict[str, Any]:
+    result = make_request("GET", endpoint, params={"max_results": 100})
+    if not result.get("success"):
+        return _governance_error(result)
+    return {"success": True, "items": (result.get("data") or {}).get(key) or []}
+
+
+def _normalized_storage_path(value: Any) -> str:
+    return str(value or "").strip().rstrip("/").lower()
+
+
+def _external_location_matches(storage_path: Any) -> Dict[str, Any]:
+    """Match external locations that are parents of one object's storage path."""
+    normalized_path = _normalized_storage_path(storage_path)
+    if not normalized_path:
+        return {"success": True, "external_locations": []}
+    result = _list_uc_resource("/api/2.1/unity-catalog/external-locations", "external_locations")
+    if not result.get("success"):
+        return result
+    matches = []
+    for item in result.get("items", []):
+        normalized_url = _normalized_storage_path(item.get("url"))
+        if normalized_url and (
+            normalized_path == normalized_url
+            or normalized_path.startswith(f"{normalized_url}/")
+        ):
+            matches.append({
+                "external_location": _unavailable(item.get("name")),
+                "url": _unavailable(item.get("url")),
+                "storage_credential": _unavailable(item.get("credential_name")),
+                "owner": _unavailable(item.get("owner")),
+                "read_only": bool(item.get("read_only", False)),
+            })
+    matches.sort(key=lambda item: len(_normalized_storage_path(item.get("url"))), reverse=True)
+    return {"success": True, "external_locations": matches}
+
+
+def _credential_type(item: Dict[str, Any]) -> tuple[str, str]:
+    credential_type = next((key for key in (
+        "aws_iam_role", "azure_managed_identity", "azure_service_principal",
+        "gcp_service_account_key", "databricks_gcp_service_account",
+    ) if item.get(key) is not None), item.get("purpose"))
+    value = str(credential_type or "")
+    provider = "AWS" if value.startswith("aws") else "Azure" if value.startswith("azure") else "GCP" if "gcp" in value else "Unavailable"
+    return _unavailable(credential_type), provider
+
+
+def _credentials_for_locations(locations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    credentials = []
+    names = sorted({
+        str(item.get("storage_credential") or "").strip()
+        for item in locations
+        if item.get("storage_credential") not in (None, "", "Unavailable")
+    })
+    for name in names:
+        result = make_request("GET", f"/api/2.1/unity-catalog/storage-credentials/{quote(name, safe='')}")
+        if not result.get("success"):
+            credentials.append({"credential_name": name, "owner": "Unavailable", "credential_type": "Unavailable", "cloud_provider": "Unavailable", "read_only": "Unavailable", "comment": "Unavailable"})
+            continue
+        item = result.get("data") or {}
+        credential_type, provider = _credential_type(item)
+        credentials.append({
+            "credential_name": name, "owner": _unavailable(item.get("owner")),
+            "credential_type": credential_type, "cloud_provider": provider,
+            "read_only": bool(item.get("read_only", False)), "comment": _unavailable(item.get("comment")),
+        })
+    return {"success": True, "credentials": credentials}
+
+
+def get_catalog_governance(catalog_name: str, section: str) -> Dict[str, Any]:
+    """Lazily retrieve one normalized governance section for a catalog."""
+    if section == "unity-catalog":
+        catalog = make_request("GET", f"/api/2.1/unity-catalog/catalogs/{quote(catalog_name, safe='')}")
+        if not catalog.get("success"):
+            return _governance_error(catalog)
+        data = catalog.get("data") or {}
+        assignment = make_request("GET", "/api/2.1/unity-catalog/current-metastore-assignment")
+        assignment_data = assignment.get("data") or {} if assignment.get("success") else {}
+        metastore_id = data.get("metastore_id") or assignment_data.get("metastore_id")
+        metastore = {}
+        if metastore_id:
+            detail = make_request("GET", f"/api/2.1/unity-catalog/metastores/{quote(str(metastore_id), safe='')}")
+            if detail.get("success"):
+                metastore = detail.get("data") or {}
+        return {"success": True, "information": {
+            "unity_catalog_name": _unavailable(data.get("name")),
+            "metastore_name": _unavailable(metastore.get("name")),
+            "metastore_id": _unavailable(metastore_id),
+            "region": _unavailable(metastore.get("region")),
+            "isolation_mode": _unavailable(data.get("isolation_mode")),
+            "default_catalog": _unavailable(assignment_data.get("default_catalog_name")),
+            "owner": _unavailable(data.get("owner")),
+        }}
+    if section == "storage-credentials":
+        metadata = get_catalog_metadata(catalog_name)
+        if not metadata.get("success"):
+            return _governance_error(metadata)
+        matches = _external_location_matches((metadata.get("metadata") or {}).get("storage_location"))
+        if not matches.get("success"):
+            return matches
+        return _credentials_for_locations(matches.get("external_locations", []))
+    if section == "external-locations":
+        metadata = get_catalog_metadata(catalog_name)
+        if not metadata.get("success"):
+            return _governance_error(metadata)
+        return _external_location_matches((metadata.get("metadata") or {}).get("storage_location"))
+    if section in {"attached-workspaces", "catalog-binding"}:
+        result = get_catalog_binding(catalog_name)
+        if not result.get("success"):
+            return _governance_error(result)
+        return {"success": True, "workspaces": [{
+            **item, "binding_type": item.get("access_level") or "Unavailable",
+        } for item in result.get("bindings", [])]}
+    return {"success": False, "message": "Unknown governance section.", "status_code": 400}
+
+
+def get_schema_governance(catalog_name: str, schema_name: str, section: str) -> Dict[str, Any]:
+    if section == "objects":
+        result = get_schema_objects(catalog_name, schema_name)
+        if not result.get("success"):
+            return _governance_error(result)
+        return {"success": True, "objects": result.get("objects", [])}
+    if section == "parent-catalog":
+        return {"success": True, "information": {
+            "parent_catalog": _unavailable(catalog_name),
+        }}
+    metadata = get_schema_metadata(catalog_name, schema_name)
+    if not metadata.get("success"):
+        return _governance_error(metadata)
+    data = metadata.get("metadata") or {}
+    if section == "storage":
+        matches = _external_location_matches(data.get("storage_location"))
+        locations = matches.get("external_locations", []) if matches.get("success") else []
+        return {"success": True, "information": {
+            "storage_location": _unavailable(data.get("storage_location")),
+            "storage_type": _unavailable(data.get("storage_type")),
+            "storage_credential": _unavailable(locations[0].get("storage_credential") if locations else data.get("storage_credential")),
+            "external_location": _unavailable(locations[0].get("external_location") if locations else None),
+            "parent_catalog": _unavailable(data.get("catalog_name") or catalog_name),
+        }}
+    if section == "external-locations":
+        return _external_location_matches(data.get("storage_location"))
+    return {"success": False, "message": "Unknown governance section.", "status_code": 400}
+
+
+def get_table_governance(catalog_name: str, schema_name: str, table_name: str, section: str) -> Dict[str, Any]:
+    metadata = get_table_metadata(catalog_name, schema_name, table_name)
+    if not metadata.get("success"):
+        return _governance_error(metadata)
+    data = metadata.get("metadata") or {}
+    if section == "storage":
+        matches = _external_location_matches(data.get("storage_location"))
+        locations = matches.get("external_locations", []) if matches.get("success") else []
+        return {"success": True, "information": {
+            "storage_location": _unavailable(data.get("storage_location")),
+            "storage_type": _unavailable(data.get("table_type")),
+            "format": _unavailable(data.get("data_source_format")),
+            "storage_credential": _unavailable(locations[0].get("storage_credential") if locations else None),
+            "external_location": _unavailable(locations[0].get("external_location") if locations else None),
+        }}
+    if section == "external-locations":
+        return _external_location_matches(data.get("storage_location"))
+    if section == "columns":
+        return {"success": True, "columns": [{
+            "column_name": _unavailable(item.get("name")),
+            "data_type": _unavailable(item.get("type_text") or item.get("type_name")),
+            "nullable": item.get("nullable") if item.get("nullable") is not None else "Unavailable",
+            "default": _unavailable(
+                item.get("default_value")
+                or ((item.get("type_json") or {}).get("default") if isinstance(item.get("type_json"), dict) else None)
+            ),
+            "comment": _unavailable(item.get("comment")),
+        } for item in data.get("columns", [])]}
+    if section == "statistics":
+        result = get_table_statistics(catalog_name, schema_name, table_name)
+        return result if result.get("success") else _governance_error(result)
+    return {"success": False, "message": "Unknown governance section.", "status_code": 400}
+
+
+def get_volume_governance(catalog_name: str, schema_name: str, volume_name: str, section: str) -> Dict[str, Any]:
+    if section == "attached-workspaces":
+        result = get_volume_binding(catalog_name, schema_name, volume_name)
+        return {"success": True, "workspaces": result.get("bindings", [])}
+    metadata = get_volume_metadata(catalog_name, schema_name, volume_name)
+    if not metadata.get("success"):
+        return _governance_error(metadata)
+    data = metadata.get("metadata") or {}
+    if section == "storage":
+        url = data.get("storage_location") or data.get("storage_url")
+        matches = _external_location_matches(url)
+        locations = matches.get("external_locations", []) if matches.get("success") else []
+        provider = "AWS" if str(url).startswith("s3://") else "Azure" if str(url).startswith(("abfss://", "wasbs://")) else "GCP" if str(url).startswith("gs://") else "Unavailable"
+        return {"success": True, "information": {
+            "storage_credential": _unavailable(locations[0].get("storage_credential") if locations else data.get("storage_credential")),
+            "external_location": _unavailable(locations[0].get("external_location") if locations else data.get("external_location")),
+            "storage_url": _unavailable(url), "cloud_provider": provider,
+            "read_only": data.get("read_only") if data.get("read_only") is not None else "Unavailable",
+        }}
+    if section == "external-locations":
+        return _external_location_matches(data.get("storage_location") or data.get("storage_url"))
+    return {"success": False, "message": "Unknown governance section.", "status_code": 400}
 
 
 def preview_table_data(
